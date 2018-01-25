@@ -56,7 +56,7 @@ VALID_BACKEND_HINTS = ('processes', 'threads', None)
 VALID_BACKEND_CONSTRAINTS = ('sharedmem', None)
 
 
-def get_active_backend(prefer=None, require=None):
+def get_active_backend(prefer=None, require=None, verbose=0):
     """Return the active default backend"""
     if prefer not in VALID_BACKEND_HINTS:
         raise ValueError("prefer=%r is not a valid backend hint, "
@@ -77,8 +77,13 @@ def get_active_backend(prefer=None, require=None):
         if require == 'sharedmem' and not supports_sharedmem:
             # This backend does not match the shared memory constraint:
             # fallback to the default thead-based backend.
-            backend = BACKENDS[DEFAULT_THREAD_BACKEND]()
-            return backend, n_jobs
+            sharedmem_backend = BACKENDS[DEFAULT_THREAD_BACKEND]()
+            if verbose >= 10:
+                print("Using %s as joblib.Parallel backend instead of %s "
+                      "as the latter does not provide shared memory semantics."
+                      % (sharedmem_backend.__class__.__name__,
+                         backend.__class__.__name__))
+            return sharedmem_backend, n_jobs
         else:
             return backend_and_jobs
 
@@ -154,12 +159,15 @@ else:
 class BatchedCalls(object):
     """Wrap a sequence of (func, args, kwargs) tuples as a single callable"""
 
-    def __init__(self, iterator_slice):
+    def __init__(self, iterator_slice, backend):
         self.items = list(iterator_slice)
         self._size = len(self.items)
+        self._backend = backend
 
     def __call__(self):
-        return [func(*args, **kwargs) for func, args, kwargs in self.items]
+        with parallel_backend(self._backend):
+            return [func(*args, **kwargs)
+                    for func, args, kwargs in self.items]
 
     def __len__(self):
         return self._size
@@ -167,10 +175,10 @@ class BatchedCalls(object):
     def __getstate__(self):
         items = [(dumps(func), args, kwargs)
                  for func, args, kwargs in self.items]
-        return (items, self._size)
+        return (items, self._size, self._backend)
 
     def __setstate__(self, state):
-        items, self._size = state
+        items, self._size, self._backend = state
         self.items = [(loads(func), args, kwargs)
                       for func, args, kwargs in items]
 
@@ -338,6 +346,7 @@ class Parallel(Logger):
             - finally, you can register backends by calling
               register_parallel_backend. This will allow you to implement
               a backend of your liking.
+
             It is not recommended to hard-code the backend name in a call to
             Parallel in a library. Instead it is recommended to set soft hints
             (prefer) or hard constraints (require) so as to make it possible
@@ -351,10 +360,8 @@ class Parallel(Logger):
         require: 'sharedmem' or None, default None
             Hard constraint to select the backend. If set to 'sharedmem',
             the selected backend will be single-host and thread-based even
-            if the user asked for a non-thread based backend with the
-            parallel_backend this constraint ensures that this choice will
-            be locally overriden by the default thread-based backend:
-            'threading'.
+            if the user asked for a non-thread based backend with
+            parallel_backend.
         verbose: int, optional
             The verbosity level: if non zero, progress messages are
             printed. Above 50, the output is sent to stdout.
@@ -528,7 +535,7 @@ class Parallel(Logger):
                  temp_folder=None, max_nbytes='1M', mmap_mode='r',
                  prefer=None, require=None):
         active_backend, default_n_jobs = get_active_backend(
-            prefer=prefer, require=require)
+            prefer=prefer, require=require, verbose=verbose)
         if backend is None and n_jobs == 1:
             # If we are under a parallel_backend context manager, look up
             # the default number of jobs and use that instead:
@@ -685,7 +692,8 @@ class Parallel(Logger):
             batch_size = self.batch_size
 
         with self._lock:
-            tasks = BatchedCalls(itertools.islice(iterator, batch_size))
+            tasks = BatchedCalls(itertools.islice(iterator, batch_size),
+                                 self._backend.get_nested_backend())
             if len(tasks) == 0:
                 # No more tasks available in the iterator: tell caller to stop.
                 return False
@@ -862,7 +870,8 @@ Sub-process traceback:
                 # consumption.
                 self._iterating = False
 
-            self.retrieve()
+            with self._backend.retrieval_context():
+                self.retrieve()
             # Make sure that we get a last message telling us we are done
             elapsed_time = time.time() - self._start_time
             self._print('Done %3i out of %3i | elapsed: %s finished',
