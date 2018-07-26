@@ -417,7 +417,7 @@ boolean mask array or callable
         self._update_fitted_transformers(transformers)
         self._validate_output(Xs)
 
-        return _hstack(list(Xs))
+        return self._hstack(list(Xs))
 
     def transform(self, X):
         """Transform X separately by each transformer, concatenate results.
@@ -445,7 +445,23 @@ boolean mask array or callable
             # All transformers are None
             return np.zeros((X.shape[0], 0))
 
-        return _hstack(list(Xs))
+        return self._hstack(list(Xs))
+
+    @staticmethod
+    def _hstack(X):
+        """
+        Stacks X horizontally.
+
+        Provided as a staticmethod to enable subclasses of ColumnTransformer
+        to customize the stacking behavior.
+
+        Supports input types (X): list of
+            numpy arrays, sparse arrays and DataFrames
+        """
+        if any(sparse.issparse(f) for f in X):
+            return sparse.hstack(X).tocsr()
+        else:
+            return np.hstack(X)
 
 
 def _check_key_type(key, superclass):
@@ -477,19 +493,6 @@ def _check_key_type(key, superclass):
             # superclass = six.string_types
             return key.dtype.kind in ('O', 'U', 'S')
     return False
-
-
-def _hstack(X):
-    """
-    Stacks X horizontally.
-
-    Supports input types (X): list of
-        numpy arrays, sparse arrays and DataFrames
-    """
-    if any(sparse.issparse(f) for f in X):
-        return sparse.hstack(X).tocsr()
-    else:
-        return np.hstack(X)
 
 
 def _get_column(X, key):
